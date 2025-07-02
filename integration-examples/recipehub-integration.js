@@ -253,6 +253,7 @@ export const AIRecipeGenerator = ({ onRecipeGenerated }) => {
       </div>
 
       {error && <div className="error">{error}</div>}
+      }
 
       <button 
         onClick={handleGenerateRecipe} 
