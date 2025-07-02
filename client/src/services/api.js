@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'https://chefgpt-bi9s.onrender.com/api';
+const API_BASE_URL = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:3001/api';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -68,9 +68,25 @@ export const aiApi = {
     return api.get('/subscriptions/status');
   },
 
-  // Recipe Generation
+  // Recipe Management
   generateRecipe: async (data) => {
     return api.post('/recipes/generate', data);
+  },
+
+  getUserRecipes: async (page = 1, limit = 20) => {
+    return api.get(`/recipes?page=${page}&limit=${limit}`);
+  },
+
+  getRecipe: async (id) => {
+    return api.get(`/recipes/${id}`);
+  },
+
+  updateRecipe: async (id, data) => {
+    return api.put(`/recipes/${id}`, data);
+  },
+
+  deleteRecipe: async (id) => {
+    return api.delete(`/recipes/${id}`);
   },
 
   // Nutrition Analysis
@@ -86,6 +102,22 @@ export const aiApi = {
   // Meal Planning
   generateMealPlan: async (data) => {
     return api.post('/meal-plans/generate', data);
+  },
+
+  getUserMealPlans: async (page = 1, limit = 20) => {
+    return api.get(`/meal-plans?page=${page}&limit=${limit}`);
+  },
+
+  getMealPlan: async (id) => {
+    return api.get(`/meal-plans/${id}`);
+  },
+
+  updateMealPlan: async (id, data) => {
+    return api.put(`/meal-plans/${id}`, data);
+  },
+
+  deleteMealPlan: async (id) => {
+    return api.delete(`/meal-plans/${id}`);
   },
 
   // Chat Assistant

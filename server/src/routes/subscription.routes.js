@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { StripeService, SUBSCRIPTION_PLANS } from '../services/stripeService.js';
 import { authenticateToken } from '../middleware/auth.js';
+import { Database } from '../config/database.js';
 import { logger } from '../utils/logger.js';
 
 const router = Router();
@@ -31,9 +32,12 @@ router.post('/create-checkout-session', authenticateToken, async (req, res) => {
     // Create or get Stripe customer
     let customerId = user.stripeCustomerId;
     if (!customerId) {
-      const customer = await StripeService.createCustomer(user.email);
+      const userData = await Database.getUserById(user.id);
+      const customer = await StripeService.createCustomer(userData.email, userData.name);
       customerId = customer.id;
-      // Here you would update the user's stripeCustomerId in your database
+      
+      // Update user with Stripe customer ID
+      await Database.updateUser(user.id, { stripe_customer_id: customerId });
     }
 
     const successUrl = `${process.env.CLIENT_URL}/subscription/success?session_id={CHECKOUT_SESSION_ID}`;
@@ -129,25 +133,82 @@ router.post('/webhook', async (req, res) => {
       case 'customer.subscription.updated':
         const subscription = event.data.object;
         logger.info(`Subscription ${event.type}: ${subscription.id}`);
-        // Here you would update the user's subscription in your database
+        
+        // Find user by Stripe customer ID
+        const user = await Database.getUserByEmail(subscription.customer);
+        if (user) {
+          // Get plan from price ID
+          const plan = StripeService.getPlanByPriceId(subscription.items.data[0].price.id);
+          if (plan) {
+            // Update subscription in database
+            await Database.updateSubscription(user.id, {
+              plan: plan.id,
+              status: subscription.status,
+              stripe_subscription_id: subscription.id,
+              current_period_start: new Date(subscription.current_period_start * 1000),
+              current_period_end: new Date(subscription.current_period_end * 1000)
+            });
+
+            // Update usage tracking with new limits
+            const currentMonth = Database.getCurrentMonth();
+            const usage = await Database.getOrCreateUsageTracking(user.id, currentMonth);
+            if (usage.request_limit !== Database.getRequestLimitForPlan(plan.id)) {
+              await Database.updateUsageTracking(user.id, currentMonth, {
+                request_limit: Database.getRequestLimitForPlan(plan.id)
+              });
+            }
+          }
+        }
         break;
 
       case 'customer.subscription.deleted':
         const deletedSubscription = event.data.object;
         logger.info(`Subscription cancelled: ${deletedSubscription.id}`);
-        // Here you would update the user's subscription status to cancelled
+        
+        // Update subscription to free plan
+        const cancelledSub = await Database.getSubscriptionByStripeId(deletedSubscription.id);
+        if (cancelledSub) {
+          await Database.updateSubscription(cancelledSub.user_id, {
+            plan: 'free',
+            status: 'cancelled',
+            stripe_subscription_id: null,
+            current_period_start: null,
+            current_period_end: null
+          });
+
+          // Reset usage tracking to free limits
+          const currentMonth = Database.getCurrentMonth();
+          await Database.getOrCreateUsageTracking(cancelledSub.user_id, currentMonth);
+        }
         break;
 
       case 'invoice.payment_succeeded':
         const invoice = event.data.object;
         logger.info(`Payment succeeded: ${invoice.id}`);
-        // Here you would reset the user's monthly request count
+        
+        // Reset monthly usage on successful payment
+        if (invoice.subscription) {
+          const sub = await Database.getSubscriptionByStripeId(invoice.subscription);
+          if (sub) {
+            const currentMonth = Database.getCurrentMonth();
+            await Database.resetMonthlyUsage(sub.user_id, currentMonth);
+          }
+        }
         break;
 
       case 'invoice.payment_failed':
         const failedInvoice = event.data.object;
         logger.info(`Payment failed: ${failedInvoice.id}`);
-        // Here you would handle failed payment (send email, suspend account, etc.)
+        
+        // Handle failed payment - could suspend account or send notification
+        if (failedInvoice.subscription) {
+          const sub = await Database.getSubscriptionByStripeId(failedInvoice.subscription);
+          if (sub) {
+            await Database.updateSubscription(sub.user_id, {
+              status: 'past_due'
+            });
+          }
+        }
         break;
 
       default:

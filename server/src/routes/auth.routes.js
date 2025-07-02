@@ -3,12 +3,10 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { validateRequest } from '../middleware/validation.js';
 import { authSchema } from '../schemas/auth.schemas.js';
+import { Database } from '../config/database.js';
 import { logger } from '../utils/logger.js';
 
 const router = Router();
-
-// Mock user database (replace with your actual database)
-const users = [];
 
 // Register endpoint
 router.post('/register', validateRequest(authSchema.register), async (req, res) => {
@@ -16,7 +14,7 @@ router.post('/register', validateRequest(authSchema.register), async (req, res) 
     const { email, password, name } = req.body;
 
     // Check if user already exists
-    const existingUser = users.find(u => u.email === email);
+    const existingUser = await Database.getUserByEmail(email);
     if (existingUser) {
       return res.status(400).json({
         success: false,
@@ -28,36 +26,45 @@ router.post('/register', validateRequest(authSchema.register), async (req, res) 
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Create user
-    const user = {
-      id: Date.now().toString(),
+    const userData = {
       email,
       name,
-      password: hashedPassword,
-      subscription: {
-        plan: 'free',
-        status: 'active',
-        requestsUsed: 0,
-        requestLimit: 5
-      },
-      stripeCustomerId: null,
-      createdAt: new Date()
+      password_hash: hashedPassword
     };
 
-    users.push(user);
+    const user = await Database.createUser(userData);
+
+    // Create default subscription
+    const subscriptionData = {
+      user_id: user.id,
+      plan: 'free',
+      status: 'active'
+    };
+
+    const subscription = await Database.createSubscription(subscriptionData);
+
+    // Create initial usage tracking
+    const currentMonth = Database.getCurrentMonth();
+    await Database.getOrCreateUsageTracking(user.id, currentMonth);
 
     // Generate JWT token
     const token = jwt.sign(
       {
         id: user.id,
         email: user.email,
-        subscription: user.subscription
+        subscription: {
+          plan: subscription.plan,
+          status: subscription.status,
+          requestsUsed: 0,
+          requestLimit: Database.getRequestLimitForPlan(subscription.plan)
+        }
       },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
 
     logger.info(`User registered: ${email}`);
-    console.log(user);
+
     res.status(201).json({
       success: true,
       data: {
@@ -66,7 +73,12 @@ router.post('/register', validateRequest(authSchema.register), async (req, res) 
           id: user.id,
           email: user.email,
           name: user.name,
-          subscription: user.subscription
+          subscription: {
+            plan: subscription.plan,
+            status: subscription.status,
+            requestsUsed: 0,
+            requestLimit: Database.getRequestLimitForPlan(subscription.plan)
+          }
         }
       },
       message: 'User registered successfully'
@@ -87,7 +99,7 @@ router.post('/login', validateRequest(authSchema.login), async (req, res) => {
     const { email, password } = req.body;
 
     // Find user
-    const user = users.find(u => u.email === email);
+    const user = await Database.getUserByEmail(email);
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -96,7 +108,7 @@ router.post('/login', validateRequest(authSchema.login), async (req, res) => {
     }
 
     // Verify password
-    const isValidPassword = await bcrypt.compare(password, user.password);
+    const isValidPassword = await bcrypt.compare(password, user.password_hash);
     if (!isValidPassword) {
       return res.status(401).json({
         success: false,
@@ -104,13 +116,23 @@ router.post('/login', validateRequest(authSchema.login), async (req, res) => {
       });
     }
 
+    // Get subscription and usage data
+    const subscription = await Database.getSubscriptionByUserId(user.id);
+    const currentMonth = Database.getCurrentMonth();
+    const usage = await Database.getOrCreateUsageTracking(user.id, currentMonth);
+
     // Generate JWT token
     const token = jwt.sign(
       {
         id: user.id,
         email: user.email,
-        subscription: user.subscription,
-        stripeCustomerId: user.stripeCustomerId
+        stripeCustomerId: user.stripe_customer_id,
+        subscription: {
+          plan: subscription?.plan || 'free',
+          status: subscription?.status || 'active',
+          requestsUsed: usage.requests_used,
+          requestLimit: usage.request_limit
+        }
       },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
@@ -126,7 +148,12 @@ router.post('/login', validateRequest(authSchema.login), async (req, res) => {
           id: user.id,
           email: user.email,
           name: user.name,
-          subscription: user.subscription
+          subscription: {
+            plan: subscription?.plan || 'free',
+            status: subscription?.status || 'active',
+            requestsUsed: usage.requests_used,
+            requestLimit: usage.request_limit
+          }
         }
       },
       message: 'Login successful'

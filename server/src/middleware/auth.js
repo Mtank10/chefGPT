@@ -1,7 +1,8 @@
 import jwt from 'jsonwebtoken';
+import { Database } from '../config/database.js';
 import { logger } from '../utils/logger.js';
 
-export const authenticateToken = (req, res, next) => {
+export const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
@@ -14,7 +15,33 @@ export const authenticateToken = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
+    
+    // Get fresh user data from database
+    const user = await Database.getUserById(decoded.id);
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Get current subscription and usage
+    const subscription = await Database.getSubscriptionByUserId(user.id);
+    const currentMonth = Database.getCurrentMonth();
+    const usage = await Database.getOrCreateUsageTracking(user.id, currentMonth);
+
+    req.user = {
+      id: user.id,
+      email: user.email,
+      stripeCustomerId: user.stripe_customer_id,
+      subscription: {
+        plan: subscription?.plan || 'free',
+        status: subscription?.status || 'active',
+        requestsUsed: usage.requests_used,
+        requestLimit: usage.request_limit
+      }
+    };
+
     next();
   } catch (error) {
     logger.error('Token verification failed:', error);
@@ -25,7 +52,7 @@ export const authenticateToken = (req, res, next) => {
   }
 };
 
-export const checkSubscriptionLimits = (req, res, next) => {
+export const checkSubscriptionLimits = async (req, res, next) => {
   const user = req.user;
   
   if (!user) {
@@ -83,4 +110,18 @@ export const requirePlan = (requiredPlans) => {
 
     next();
   };
+};
+
+export const incrementUsage = async (req, res, next) => {
+  try {
+    const user = req.user;
+    if (user && user.subscription.requestLimit !== -1) {
+      const currentMonth = Database.getCurrentMonth();
+      await Database.incrementUsage(user.id, currentMonth);
+    }
+    next();
+  } catch (error) {
+    logger.error('Error incrementing usage:', error);
+    next(); // Continue even if usage tracking fails
+  }
 };
